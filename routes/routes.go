@@ -73,12 +73,19 @@ func SetupRoutes(r *gin.Engine) {
 				execution.GET("/sessions/:session_id", controllers.GetOperationSession)
 				execution.GET("/sessions/:session_id/commands", controllers.GetSessionCommandRecords)
 				execution.GET("/sessions/:session_id/commands/:record_id", controllers.GetSessionCommandRecord)
+				execution.POST("/sessions/:session_id/pause", controllers.PauseRecording)
+				execution.POST("/sessions/:session_id/resume", controllers.ResumeRecording)
 			}
 
 			playback := auth.Group("/playback")
 			playback.Use(middleware.RoleAuth("super_admin", "reviewer"))
 			{
 				playback.GET("/sessions/:session_id", controllers.PlaybackSession)
+				playback.GET("/recordings", controllers.ListScreenRecordings)
+				playback.GET("/recordings/:session_id", controllers.GetScreenRecording)
+				playback.GET("/recordings/:session_id/frames", controllers.GetScreenRecordingFrames)
+				playback.GET("/recordings/:session_id/full", controllers.PlaybackScreenRecording)
+				playback.GET("/recordings/:session_id/at-time", controllers.GetScreenAtTime)
 			}
 
 			audit := auth.Group("/audit")

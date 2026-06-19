@@ -75,6 +75,134 @@ func recordCommand(sessionID string, opReqID uint, seq int, operatorID uint, com
 	return record
 }
 
+var screenRecorderState = make(map[string]*models.ScreenRecording)
+var screenFrameCounters = make(map[string]int)
+var cumulativeScreens = make(map[string]string)
+
+func initScreenRecording(sessionID string, opReqID uint, operatorID uint, startTime time.Time) *models.ScreenRecording {
+	recording := &models.ScreenRecording{
+		SessionID:        sessionID,
+		OperationReqID:   opReqID,
+		OperatorID:       operatorID,
+		RecordingStatus:  "recording",
+		StartTime:        startTime,
+		TerminalCols:     80,
+		TerminalRows:     24,
+		RecordingEnabled: true,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+	database.DB.Create(recording)
+	screenRecorderState[sessionID] = recording
+	screenFrameCounters[sessionID] = 0
+	cumulativeScreens[sessionID] = fmt.Sprintf("Connected to target server\nSession started at %s\n\n", startTime.Format("2006-01-02 15:04:05"))
+	return recording
+}
+
+func recordScreenFrame(sessionID string, opReqID uint, operatorID uint, commandSeq int, outputType string, content string, inputContent string, commandStartTime time.Time, commandDurationMs int64) {
+	recording, exists := screenRecorderState[sessionID]
+	if !exists || recording == nil || !recording.RecordingEnabled || recording.RecordingStatus != "recording" {
+		return
+	}
+
+	offsetMs := commandDurationMs
+	if commandDurationMs == 0 {
+		offsetMs = time.Since(commandStartTime).Milliseconds()
+	}
+
+	screenFrameCounters[sessionID]++
+	frameSeq := screenFrameCounters[sessionID]
+
+	hasInput := inputContent != ""
+	if hasInput {
+		cumulativeScreens[sessionID] += fmt.Sprintf("$ %s\n", inputContent)
+	}
+	if content != "" {
+		cumulativeScreens[sessionID] += content
+	}
+	if !strings.HasSuffix(cumulativeScreens[sessionID], "\n") {
+		cumulativeScreens[sessionID] += "\n"
+	}
+
+	frame := &models.SessionScreenRecord{
+		SessionID:        sessionID,
+		OperationReqID:   opReqID,
+		FrameSequence:    frameSeq,
+		OffsetMs:         offsetMs,
+		Timestamp:        time.Now(),
+		OutputType:       outputType,
+		Content:          content,
+		ContentSize:      len(content),
+		CumulativeScreen: cumulativeScreens[sessionID],
+		ScreenRows:       recording.TerminalRows,
+		ScreenCols:       recording.TerminalCols,
+		HasInput:         hasInput,
+		InputContent:     inputContent,
+		CommandSeq:       commandSeq,
+		CreatedAt:        time.Now(),
+	}
+	database.DB.Create(frame)
+
+	recording.TotalFrames = frameSeq
+	recording.UpdatedAt = time.Now()
+	database.DB.Save(recording)
+}
+
+func stopScreenRecording(sessionID string, endTime time.Time) *models.ScreenRecording {
+	recording, exists := screenRecorderState[sessionID]
+	if !exists || recording == nil {
+		return nil
+	}
+
+	recording.RecordingStatus = "stopped"
+	recording.EndTime = &endTime
+	recording.TotalDurationMs = endTime.Sub(recording.StartTime).Milliseconds() - recording.TotalPausedMs
+
+	if cumulative, ok := cumulativeScreens[sessionID]; ok && len(cumulative) > 0 {
+		preview := cumulative
+		if len(preview) > 500 {
+			preview = preview[:500]
+		}
+		recording.ScreenShotPreview = preview
+	}
+
+	recording.UpdatedAt = time.Now()
+	database.DB.Save(recording)
+
+	delete(screenRecorderState, sessionID)
+	delete(screenFrameCounters, sessionID)
+	delete(cumulativeScreens, sessionID)
+
+	return recording
+}
+
+func pauseScreenRecording(sessionID string) *models.ScreenRecording {
+	recording, exists := screenRecorderState[sessionID]
+	if !exists || recording == nil {
+		return nil
+	}
+	if recording.RecordingStatus == "recording" {
+		recording.RecordingStatus = "paused"
+		recording.PauseCount++
+		recording.UpdatedAt = time.Now()
+		database.DB.Save(recording)
+	}
+	return recording
+}
+
+func resumeScreenRecording(sessionID string) *models.ScreenRecording {
+	recording, exists := screenRecorderState[sessionID]
+	if !exists || recording == nil {
+		return nil
+	}
+	if recording.RecordingStatus == "paused" {
+		recording.RecordingStatus = "recording"
+		recording.UpdatedAt = time.Now()
+		database.DB.Save(recording)
+	}
+	return recording
+}
+
 func classifyCommand(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -188,13 +316,19 @@ func ExecuteOperation(c *gin.Context) {
 			ClientIP:       clientIP,
 		}
 		database.DB.Create(&session)
+
+		initScreenRecording(sessionID, operation.ID, uid, now)
 	}
 
 	command := operation.OperationCommand
 	dangerLevel := checkDangerLevel(command)
+	execStartTime := time.Now()
 
 	if err := validateCommand(command); err != nil {
-		recordCommand(session.SessionID, operation.ID, session.CommandCount+1, uid, command, "", 0, true, err.Error(), dangerLevel)
+		cmdSeq := session.CommandCount + 1
+		blockedOutput := fmt.Sprintf("[BLOCKED] %s\n", err.Error())
+		recordCommand(session.SessionID, operation.ID, cmdSeq, uid, command, blockedOutput, 0, true, err.Error(), dangerLevel)
+		recordScreenFrame(session.SessionID, operation.ID, uid, cmdSeq, "blocked", blockedOutput, command, execStartTime, 0)
 
 		operation.Status = "completed"
 		operation.ExecStatus = "blocked"
@@ -215,7 +349,6 @@ func ExecuteOperation(c *gin.Context) {
 
 	password, _ := utils.AesDecrypt(operation.PrivilegeAccount.EncryptedPass, config.AppConfig.AESKey)
 
-	execStartTime := time.Now()
 	resultOutput := simulateRemoteExecution(
 		operation.PrivilegeAccount.Host,
 		operation.PrivilegeAccount.Port,
@@ -230,6 +363,7 @@ func ExecuteOperation(c *gin.Context) {
 	database.DB.Save(&session)
 
 	recordCommand(session.SessionID, operation.ID, session.CommandCount, uid, command, resultOutput, execDuration, false, "", dangerLevel)
+	recordScreenFrame(session.SessionID, operation.ID, uid, session.CommandCount, "stdout", resultOutput, command, execStartTime, execDuration)
 
 	operation.ExecStatus = "executing"
 	operation.ExecResult = resultOutput
@@ -300,9 +434,13 @@ func ExecuteCommandInSession(c *gin.Context) {
 	}
 
 	dangerLevel := checkDangerLevel(req.Command)
+	execStartTime := time.Now()
 
 	if err := validateCommand(req.Command); err != nil {
-		recordCommand(session.SessionID, session.OperationReqID, session.CommandCount+1, uid, req.Command, "", 0, true, err.Error(), dangerLevel)
+		cmdSeq := session.CommandCount + 1
+		blockedOutput := fmt.Sprintf("[BLOCKED] %s\n", err.Error())
+		recordCommand(session.SessionID, session.OperationReqID, cmdSeq, uid, req.Command, blockedOutput, 0, true, err.Error(), dangerLevel)
+		recordScreenFrame(session.SessionID, session.OperationReqID, uid, cmdSeq, "blocked", blockedOutput, req.Command, execStartTime, 0)
 		session.CommandCount++
 		session.SessionLog += fmt.Sprintf("\n[%s] $ %s\n[BLOCKED] %s", now.Format("2006-01-02 15:04:05"), req.Command, err.Error())
 		database.DB.Save(&session)
@@ -322,7 +460,6 @@ func ExecuteCommandInSession(c *gin.Context) {
 
 	password, _ := utils.AesDecrypt(session.OperationRequest.PrivilegeAccount.EncryptedPass, config.AppConfig.AESKey)
 
-	execStartTime := time.Now()
 	resultOutput := simulateRemoteExecution(
 		session.OperationRequest.PrivilegeAccount.Host,
 		session.OperationRequest.PrivilegeAccount.Port,
@@ -337,6 +474,7 @@ func ExecuteCommandInSession(c *gin.Context) {
 	database.DB.Save(&session)
 
 	recordCommand(session.SessionID, session.OperationReqID, session.CommandCount, uid, req.Command, resultOutput, execDuration, false, "", dangerLevel)
+	recordScreenFrame(session.SessionID, session.OperationReqID, uid, session.CommandCount, "stdout", resultOutput, req.Command, execStartTime, execDuration)
 
 	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
 		"session_id":       sessionID,
@@ -377,6 +515,8 @@ func CloseOperationSession(c *gin.Context) {
 		session.EndTime = &endTime
 		session.TotalDurationMs = endTime.Sub(session.StartTime).Milliseconds()
 		database.DB.Save(&session)
+
+		stopScreenRecording(session.SessionID, endTime)
 
 		if operation.Status == "approved" || operation.ExecStatus == "executing" {
 			operation.Status = "completed"
@@ -735,4 +875,353 @@ func GetOperationSessions(c *gin.Context) {
 	query.Find(&sessions)
 
 	c.JSON(http.StatusOK, utils.SuccessResponse(sessions))
+}
+
+func ListScreenRecordings(c *gin.Context) {
+	var recordings []models.ScreenRecording
+	query := database.DB.Preload("Operator")
+
+	status := c.Query("status")
+	if status != "" {
+		query = query.Where("recording_status = ?", status)
+	}
+
+	operatorID := c.Query("operator_id")
+	if operatorID != "" {
+		id, _ := strconv.Atoi(operatorID)
+		query = query.Where("operator_id = ?", id)
+	}
+
+	opReqID := c.Query("operation_req_id")
+	if opReqID != "" {
+		id, _ := strconv.Atoi(opReqID)
+		query = query.Where("operation_req_id = ?", id)
+	}
+
+	startDate := c.Query("start_date")
+	if startDate != "" {
+		query = query.Where("DATE(start_time) >= ?", startDate)
+	}
+
+	endDate := c.Query("end_date")
+	if endDate != "" {
+		query = query.Where("DATE(start_time) <= ?", endDate)
+	}
+
+	query = query.Order("created_at DESC")
+	query.Find(&recordings)
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"total":      len(recordings),
+		"recordings": recordings,
+	}))
+}
+
+func GetScreenRecording(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	var recording models.ScreenRecording
+	if err := database.DB.Where("session_id = ?", sessionID).
+		Preload("Operator").
+		First(&recording).Error; err != nil {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "录屏不存在"))
+		return
+	}
+
+	var frameCount int64
+	database.DB.Model(&models.SessionScreenRecord{}).
+		Where("session_id = ?", sessionID).Count(&frameCount)
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"recording":    recording,
+		"total_frames": frameCount,
+	}))
+}
+
+func GetScreenRecordingFrames(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	var frames []models.SessionScreenRecord
+	query := database.DB.Where("session_id = ?", sessionID)
+
+	offset := c.Query("offset")
+	if offset != "" {
+		off, _ := strconv.Atoi(offset)
+		query = query.Offset(off)
+	}
+
+	limit := c.Query("limit")
+	if limit != "" {
+		l, _ := strconv.Atoi(limit)
+		query = query.Limit(l)
+	}
+
+	fromMs := c.Query("from_ms")
+	if fromMs != "" {
+		ms, _ := strconv.ParseInt(fromMs, 10, 64)
+		query = query.Where("offset_ms >= ?", ms)
+	}
+
+	toMs := c.Query("to_ms")
+	if toMs != "" {
+		ms, _ := strconv.ParseInt(toMs, 10, 64)
+		query = query.Where("offset_ms <= ?", ms)
+	}
+
+	query = query.Order("frame_sequence ASC")
+	query.Find(&frames)
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"session_id": sessionID,
+		"total":      len(frames),
+		"frames":     frames,
+	}))
+}
+
+func PlaybackScreenRecording(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	var recording models.ScreenRecording
+	if err := database.DB.Where("session_id = ?", sessionID).
+		Preload("Operator").
+		First(&recording).Error; err != nil {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "录屏不存在"))
+		return
+	}
+
+	var session models.OperationSession
+	database.DB.Where("session_id = ?", sessionID).
+		Preload("OperationRequest").Preload("OperationRequest.PrivilegeAccount").
+		First(&session)
+
+	var frames []models.SessionScreenRecord
+	database.DB.Where("session_id = ?", sessionID).
+		Order("frame_sequence ASC").
+		Find(&frames)
+
+	var commands []models.SessionCommandRecord
+	database.DB.Where("session_id = ?", sessionID).
+		Order("sequence ASC").
+		Find(&commands)
+
+	speedStr := c.DefaultQuery("speed", "1.0")
+	speed, _ := strconv.ParseFloat(speedStr, 64)
+	if speed <= 0 {
+		speed = 1.0
+	}
+	if speed > 16 {
+		speed = 16
+	}
+
+	startMsStr := c.DefaultQuery("start_ms", "0")
+	startMs, _ := strconv.ParseInt(startMsStr, 10, 64)
+
+	endMsStr := c.Query("end_ms")
+	var endMs int64 = 0
+	if endMsStr != "" {
+		endMs, _ = strconv.ParseInt(endMsStr, 10, 64)
+	}
+
+	dangerousCount := 0
+	blockedCount := 0
+	for _, cmd := range commands {
+		if cmd.IsDangerous {
+			dangerousCount++
+		}
+		if cmd.IsBlocked {
+			blockedCount++
+		}
+	}
+
+	playbackFrames := make([]gin.H, 0)
+	for _, frame := range frames {
+		if frame.OffsetMs < startMs {
+			continue
+		}
+		if endMs > 0 && frame.OffsetMs > endMs {
+			break
+		}
+
+		adjustedOffset := int64(float64(frame.OffsetMs-startMs) / speed)
+
+		playbackFrames = append(playbackFrames, gin.H{
+			"frame_sequence":   frame.FrameSequence,
+			"offset_ms":        frame.OffsetMs,
+			"adjusted_offset_ms": adjustedOffset,
+			"timestamp":        frame.Timestamp,
+			"output_type":      frame.OutputType,
+			"content":          frame.Content,
+			"content_size":     frame.ContentSize,
+			"cumulative_screen": frame.CumulativeScreen,
+			"screen_rows":      frame.ScreenRows,
+			"screen_cols":      frame.ScreenCols,
+			"has_input":        frame.HasInput,
+			"input_content":    frame.InputContent,
+			"command_seq":      frame.CommandSeq,
+		})
+	}
+
+	var initialScreen string
+	if len(frames) > 0 {
+		if startMs > 0 {
+			var closestFrame models.SessionScreenRecord
+			database.DB.Where("session_id = ? AND offset_ms <= ?", sessionID, startMs).
+				Order("offset_ms DESC").
+				Limit(1).
+				Find(&closestFrame)
+			if closestFrame.ID > 0 {
+				initialScreen = closestFrame.CumulativeScreen
+			}
+		} else {
+			initialScreen = frames[0].CumulativeScreen
+		}
+	}
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"session_id":          sessionID,
+		"recording_status":    recording.RecordingStatus,
+		"start_time":          recording.StartTime,
+		"end_time":            recording.EndTime,
+		"total_duration_ms":   recording.TotalDurationMs,
+		"total_frames":        recording.TotalFrames,
+		"terminal_cols":       recording.TerminalCols,
+		"terminal_rows":       recording.TerminalRows,
+		"operator":            recording.Operator,
+		"target_host":         session.OperationRequest.PrivilegeAccount.Host,
+		"target_user":         session.OperationRequest.PrivilegeAccount.Username,
+		"system_name":         session.OperationRequest.PrivilegeAccount.SystemName,
+		"account_name":        session.OperationRequest.PrivilegeAccount.AccountName,
+		"request_no":          session.OperationRequest.RequestNo,
+		"playback_speed":      speed,
+		"playback_start_ms":   startMs,
+		"playback_end_ms":     endMs,
+		"total_commands":      len(commands),
+		"dangerous_count":     dangerousCount,
+		"blocked_count":       blockedCount,
+		"password_visible":    false,
+		"initial_screen":      initialScreen,
+		"playback_frames":     playbackFrames,
+		"screen_shot_preview": recording.ScreenShotPreview,
+	}))
+}
+
+func GetScreenAtTime(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	msStr := c.DefaultQuery("offset_ms", "0")
+	ms, _ := strconv.ParseInt(msStr, 10, 64)
+
+	var recording models.ScreenRecording
+	if err := database.DB.Where("session_id = ?", sessionID).First(&recording).Error; err != nil {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "录屏不存在"))
+		return
+	}
+
+	var frame models.SessionScreenRecord
+	result := database.DB.Where("session_id = ? AND offset_ms <= ?", sessionID, ms).
+		Order("offset_ms DESC").
+		Limit(1).
+		Find(&frame)
+
+	if result.Error != nil || frame.ID == 0 {
+		database.DB.Where("session_id = ?", sessionID).
+			Order("offset_ms ASC").
+			Limit(1).
+			Find(&frame)
+	}
+
+	if frame.ID == 0 {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "未找到指定时间点的屏幕数据"))
+		return
+	}
+
+	var nextFrame models.SessionScreenRecord
+	database.DB.Where("session_id = ? AND offset_ms > ?", sessionID, ms).
+		Order("offset_ms ASC").
+		Limit(1).
+		Find(&nextFrame)
+
+	progress := 0.0
+	if recording.TotalDurationMs > 0 {
+		progress = float64(ms) / float64(recording.TotalDurationMs) * 100
+	}
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"session_id":          sessionID,
+		"requested_offset_ms": ms,
+		"actual_offset_ms":    frame.OffsetMs,
+		"next_offset_ms":      nextFrame.OffsetMs,
+		"total_duration_ms":   recording.TotalDurationMs,
+		"progress_percent":    fmt.Sprintf("%.2f%%", progress),
+		"frame_sequence":      frame.FrameSequence,
+		"timestamp":           frame.Timestamp,
+		"screen_content":      frame.CumulativeScreen,
+		"screen_rows":         frame.ScreenRows,
+		"screen_cols":         frame.ScreenCols,
+		"current_command_seq": frame.CommandSeq,
+		"has_input":           frame.HasInput,
+		"input_content":       frame.InputContent,
+	}))
+}
+
+func PauseRecording(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	userID, _ := c.Get("user_id")
+	role, _ := c.Get("role")
+	uid := userID.(uint)
+
+	var recording models.ScreenRecording
+	if err := database.DB.Where("session_id = ?", sessionID).First(&recording).Error; err != nil {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "录屏不存在"))
+		return
+	}
+
+	if recording.OperatorID != uid && role.(string) != "super_admin" {
+		c.JSON(http.StatusForbidden, utils.ErrorResponse(403, "无权操作此录屏"))
+		return
+	}
+
+	rec := pauseScreenRecording(sessionID)
+	if rec == nil {
+		c.JSON(http.StatusBadRequest, utils.ErrorResponse(400, "无法暂停录屏"))
+		return
+	}
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"session_id":       sessionID,
+		"recording_status": rec.RecordingStatus,
+		"pause_count":      rec.PauseCount,
+		"total_frames":     rec.TotalFrames,
+	}))
+}
+
+func ResumeRecording(c *gin.Context) {
+	sessionID := c.Param("session_id")
+
+	userID, _ := c.Get("user_id")
+	role, _ := c.Get("role")
+	uid := userID.(uint)
+
+	var recording models.ScreenRecording
+	if err := database.DB.Where("session_id = ?", sessionID).First(&recording).Error; err != nil {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(404, "录屏不存在"))
+		return
+	}
+
+	if recording.OperatorID != uid && role.(string) != "super_admin" {
+		c.JSON(http.StatusForbidden, utils.ErrorResponse(403, "无权操作此录屏"))
+		return
+	}
+
+	rec := resumeScreenRecording(sessionID)
+	if rec == nil {
+		c.JSON(http.StatusBadRequest, utils.ErrorResponse(400, "无法恢复录屏"))
+		return
+	}
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(gin.H{
+		"session_id":       sessionID,
+		"recording_status": rec.RecordingStatus,
+		"pause_count":      rec.PauseCount,
+		"total_frames":     rec.TotalFrames,
+	}))
 }

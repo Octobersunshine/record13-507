@@ -114,3 +114,43 @@ type SessionCommandRecord struct {
 	ExitCode       int       `gorm:"default:0" json:"exit_code"`
 	CreatedAt      time.Time `json:"created_at"`
 }
+
+type SessionScreenRecord struct {
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	SessionID       string    `gorm:"size:100;index" json:"session_id"`
+	OperationReqID  uint      `gorm:"index" json:"operation_req_id"`
+	FrameSequence   int       `gorm:"index" json:"frame_sequence"`
+	OffsetMs        int64     `gorm:"index" json:"offset_ms"`
+	Timestamp       time.Time `json:"timestamp"`
+	OutputType      string    `gorm:"size:10;default:stdout" json:"output_type"`
+	Content         string    `gorm:"type:text" json:"content"`
+	ContentSize     int       `gorm:"default:0" json:"content_size"`
+	CumulativeScreen string   `gorm:"type:text" json:"cumulative_screen"`
+	ScreenRows      int       `gorm:"default:24" json:"screen_rows"`
+	ScreenCols      int       `gorm:"default:80" json:"screen_cols"`
+	HasInput        bool      `gorm:"default:false" json:"has_input"`
+	InputContent    string    `gorm:"type:text" json:"input_content"`
+	CommandSeq      int       `gorm:"default:0" json:"command_seq"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type ScreenRecording struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	SessionID         string    `gorm:"size:100;uniqueIndex" json:"session_id"`
+	OperationReqID    uint      `json:"operation_req_id"`
+	OperatorID        uint      `json:"operator_id"`
+	Operator          *User     `gorm:"foreignKey:OperatorID" json:"operator,omitempty"`
+	RecordingStatus   string    `gorm:"size:20;default:recording" json:"recording_status"`
+	StartTime         time.Time `json:"start_time"`
+	EndTime           *time.Time `json:"end_time"`
+	TotalDurationMs   int64     `gorm:"default:0" json:"total_duration_ms"`
+	TotalFrames       int       `gorm:"default:0" json:"total_frames"`
+	TerminalCols      int       `gorm:"default:80" json:"terminal_cols"`
+	TerminalRows      int       `gorm:"default:24" json:"terminal_rows"`
+	RecordingEnabled  bool      `gorm:"default:true" json:"recording_enabled"`
+	PauseCount        int       `gorm:"default:0" json:"pause_count"`
+	TotalPausedMs     int64     `gorm:"default:0" json:"total_paused_ms"`
+	ScreenShotPreview string    `gorm:"type:text" json:"screen_shot_preview"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
