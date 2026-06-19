@@ -69,8 +69,16 @@ func SetupRoutes(r *gin.Engine) {
 				execution.POST("/operations/:id", controllers.ExecuteOperation)
 				execution.POST("/sessions/:session_id/execute", controllers.ExecuteCommandInSession)
 				execution.POST("/sessions/:session_id/close", controllers.CloseOperationSession)
-				execution.GET("/sessions/:session_id", controllers.GetOperationSession)
 				execution.GET("/sessions", controllers.GetOperationSessions)
+				execution.GET("/sessions/:session_id", controllers.GetOperationSession)
+				execution.GET("/sessions/:session_id/commands", controllers.GetSessionCommandRecords)
+				execution.GET("/sessions/:session_id/commands/:record_id", controllers.GetSessionCommandRecord)
+			}
+
+			playback := auth.Group("/playback")
+			playback.Use(middleware.RoleAuth("super_admin", "reviewer"))
+			{
+				playback.GET("/sessions/:session_id", controllers.PlaybackSession)
 			}
 
 			audit := auth.Group("/audit")

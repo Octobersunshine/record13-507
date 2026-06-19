@@ -81,10 +81,36 @@ type OperationSession struct {
 	SessionID        string    `gorm:"size:100;uniqueIndex" json:"session_id"`
 	OperationReqID   uint      `gorm:"not null" json:"operation_req_id"`
 	OperationRequest *OperationRequest `gorm:"foreignKey:OperationReqID" json:"operation_request,omitempty"`
+	OperatorID       uint      `gorm:"not null" json:"operator_id"`
+	Operator         *User     `gorm:"foreignKey:OperatorID" json:"operator,omitempty"`
 	StartTime        time.Time `json:"start_time"`
 	EndTime          *time.Time `json:"end_time"`
 	SessionStatus    string    `gorm:"size:20;default:active" json:"session_status"`
 	CommandCount     int       `gorm:"default:0" json:"command_count"`
 	SessionLog       string    `gorm:"type:text" json:"session_log"`
+	TermType         string    `gorm:"size:20;default:web" json:"term_type"`
+	ClientIP         string    `gorm:"size:50" json:"client_ip"`
+	TotalDurationMs  int64     `gorm:"default:0" json:"total_duration_ms"`
 	CreatedAt        time.Time `json:"created_at"`
+}
+
+type SessionCommandRecord struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	SessionID      string    `gorm:"size:100;index" json:"session_id"`
+	OperationReqID uint      `gorm:"index" json:"operation_req_id"`
+	Sequence       int       `gorm:"index" json:"sequence"`
+	OperatorID     uint      `json:"operator_id"`
+	Operator       *User     `gorm:"foreignKey:OperatorID" json:"operator,omitempty"`
+	Command        string    `gorm:"type:text;not null" json:"command"`
+	CommandType    string    `gorm:"size:30" json:"command_type"`
+	Output         string    `gorm:"type:text" json:"output"`
+	OutputSize     int       `gorm:"default:0" json:"output_size"`
+	ExecutedAt     time.Time `json:"executed_at"`
+	DurationMs     int64     `gorm:"default:0" json:"duration_ms"`
+	IsBlocked      bool      `gorm:"default:false" json:"is_blocked"`
+	BlockReason    string    `gorm:"size:200" json:"block_reason"`
+	IsDangerous    bool      `gorm:"default:false" json:"is_dangerous"`
+	DangerLevel    string    `gorm:"size:10;default:low" json:"danger_level"`
+	ExitCode       int       `gorm:"default:0" json:"exit_code"`
+	CreatedAt      time.Time `json:"created_at"`
 }

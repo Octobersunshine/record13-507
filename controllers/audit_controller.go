@@ -163,24 +163,3 @@ func GetAuditStatistics(c *gin.Context) {
 		},
 	}))
 }
-
-func GetOperationSessions(c *gin.Context) {
-	var sessions []models.OperationSession
-	query := database.DB.Preload("OperationRequest").Preload("OperationRequest.Requester").Preload("OperationRequest.PrivilegeAccount")
-
-	status := c.Query("status")
-	if status != "" {
-		query = query.Where("session_status = ?", status)
-	}
-
-	opReqID := c.Query("operation_req_id")
-	if opReqID != "" {
-		id, _ := strconv.Atoi(opReqID)
-		query = query.Where("operation_req_id = ?", id)
-	}
-
-	query = query.Order("created_at DESC")
-	query.Find(&sessions)
-
-	c.JSON(http.StatusOK, utils.SuccessResponse(sessions))
-}

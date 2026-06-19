@@ -24,6 +24,7 @@ func InitDB() error {
 		&models.OperationRequest{},
 		&models.AuditLog{},
 		&models.OperationSession{},
+		&models.SessionCommandRecord{},
 	)
 	if err != nil {
 		return err
